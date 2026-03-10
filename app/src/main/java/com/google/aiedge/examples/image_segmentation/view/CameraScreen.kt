@@ -89,6 +89,7 @@ fun CameraScreen(
             .height(height.dp)
     ) {
         CameraPreview(
+            modifier = Modifier,
             onImageAnalyzed = { imageProxy ->
                 onImageAnalyzed(imageProxy)
             })

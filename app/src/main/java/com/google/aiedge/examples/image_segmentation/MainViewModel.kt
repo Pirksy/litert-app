@@ -17,7 +17,6 @@
 package com.google.aiedge.examples.image_segmentation
 
 import android.content.Context
-import android.net.Uri
 import androidx.camera.core.ImageProxy
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -63,7 +62,7 @@ class MainViewModel(
                     val maskArray = maskTensor.buffer.array()
                     val pixels = IntArray(maskArray.size)
 
-                    val colorLabels = segmentation.coloredLabels.mapIndexed { index, coloredLabel ->
+                    val colorLabels = segmentation.labels.mapIndexed { index, coloredLabel ->
                         ColorLabel(
                             index, coloredLabel.label, coloredLabel.argb
                         )
@@ -89,8 +88,6 @@ class MainViewModel(
         }
     }
 
-    private val mediaUri = MutableStateFlow<Uri>(Uri.EMPTY)
-
     private val errorMessage = MutableStateFlow<Throwable?>(null).also {
         viewModelScope.launch {
             imageSegmentationHelper.error.collect(it)
@@ -98,10 +95,9 @@ class MainViewModel(
     }
 
     val uiState: StateFlow<UiState> = combine(
-        mediaUri,
         segmentationUiShareFlow,
         errorMessage,
-    ) { uri, segmentationUiPair, error ->
+    ) { segmentationUiPair, error ->
         UiState(
             overlayInfo = segmentationUiPair.first,
             errorMessage = error?.message

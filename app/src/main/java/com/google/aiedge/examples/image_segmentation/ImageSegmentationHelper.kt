@@ -46,31 +46,31 @@ class ImageSegmentationHelper(private val context: Context) {
     }
 
     /** As the result of sound classification, this value emits map of probabilities */
-    val segmentation: SharedFlow<SegmentationResult>
-        get() = _segmentation
     private val _segmentation = MutableSharedFlow<SegmentationResult>(
         extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+    val segmentation: SharedFlow<SegmentationResult> get() = _segmentation
 
-    val error: SharedFlow<Throwable?>
-        get() = _error
     private val _error = MutableSharedFlow<Throwable?>()
+    val error: SharedFlow<Throwable?> get() = _error
+
+    private val type: TFFile = TFFile.Deeplab
 
     private var interpreter: Interpreter? = null
-    private val coloredLabels: List<ColoredLabel> = coloredLabels()
 
-    /** Init a Interpreter from deeplap_v3.*/
+    /** Init a Interpreter from file.*/
     suspend fun initClassifier(delegate: Delegate = Delegate.CPU) {
         interpreter = try {
-            val litertBuffer = FileUtil.loadMappedFile(context, "deeplab_v3.tflite")
-            Log.i(TAG, "Done creating LiteRT buffer from deeplab_v3")
+            val litertBuffer = FileUtil.loadMappedFile(context, type.file)
+
+            Log.i(TAG, "Done creating LiteRT buffer from ${type.file}")
             val options = Interpreter.Options().apply {
                 numThreads = 4
                 useNNAPI = delegate == Delegate.NNAPI
             }
             Interpreter(litertBuffer, options)
         } catch (e: Exception) {
-            Log.i(TAG, "Create LiteRT from deeplab_v3 is failed ${e.message}")
+            Log.i(TAG, "Create LiteRT from ${type.file} is failed ${e.message}")
             _error.emit(e)
             null
         }
@@ -82,13 +82,12 @@ class ImageSegmentationHelper(private val context: Context) {
                 if (interpreter == null) return@withContext
                 val startTime = SystemClock.uptimeMillis()
 
-                val rotation = -rotationDegrees / 90
                 val (_, h, w, _) = interpreter?.getOutputTensor(0)?.shape() ?: return@withContext
                 val imageProcessor =
                     ImageProcessor
                         .Builder()
                         .add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR))
-                        .add(Rot90Op(rotation))
+                        .add(Rot90Op(-rotationDegrees / 90))
                         .add(NormalizeOp(127.5f, 127.5f))
                         .build()
 
@@ -128,7 +127,7 @@ class ImageSegmentationHelper(private val context: Context) {
         val maskImage = TensorImage()
         maskImage.load(mask, imageProperties)
         return Segmentation(
-            listOf(maskImage), coloredLabels
+            listOf(maskImage), type.labels
         )
     }
 
@@ -155,59 +154,12 @@ class ImageSegmentationHelper(private val context: Context) {
         return mask
     }
 
-    private fun coloredLabels(): List<ColoredLabel> {
-        val labels = listOf(
-            "background",
-            "aeroplane",
-            "bicycle",
-            "bird",
-            "boat",
-            "bottle",
-            "bus",
-            "car",
-            "cat",
-            "chair",
-            "cow",
-            "dining table",
-            "dog",
-            "horse",
-            "motorbike",
-            "person",
-            "potted plant",
-            "sheep",
-            "sofa",
-            "train",
-            "tv",
-            "------"
-        )
-        val colors = MutableList(labels.size) {
-            ColoredLabel(
-                labels[0], "", Color.BLACK
-            )
-        }
-
-        val random = Random()
-        val goldenRatioConjugate = 0.618033988749895
-        var hue = random.nextDouble()
-
-        // Skip the first label as it's already assigned black
-        for (idx in 1 until labels.size) {
-            hue += goldenRatioConjugate
-            hue %= 1.0
-            // Adjust saturation & lightness as needed
-            val color = Color.HSVToColor(floatArrayOf(hue.toFloat() * 360, 0.7f, 0.8f))
-            colors[idx] = ColoredLabel(labels[idx], "", color)
-        }
-
-        return colors
-    }
-
     data class Segmentation(
         val masks: List<TensorImage>,
-        val coloredLabels: List<ColoredLabel>,
+        val labels: List<Label>,
     )
 
-    data class ColoredLabel(val label: String, val displayName: String, val argb: Int)
+    data class Label(val label: String, val displayName: String, val argb: Int)
 
     enum class Delegate {
         CPU, NNAPI
@@ -224,4 +176,70 @@ class ImageSegmentationHelper(private val context: Context) {
         val channels: Int,
         val buffer: FloatBuffer,
     )
+
+    sealed interface TFFile {
+        val file: String
+        val labels: List<Label>
+
+        object Deeplab : TFFile {
+            override val file = "deeplab_v3.tflite"
+            override val labels: List<Label> = listOf(
+                "background",
+                "aeroplane",
+                "bicycle",
+                "bird",
+                "boat",
+                "bottle",
+                "bus",
+                "car",
+                "cat",
+                "chair",
+                "cow",
+                "dining table",
+                "dog",
+                "horse",
+                "motorbike",
+                "person",
+                "potted plant",
+                "sheep",
+                "sofa",
+                "train",
+                "tv",
+                "------"
+            ).let(::labels)
+        }
+
+        object Selfie : TFFile {
+            override val file = "selfie_segmenter_square.tflite"
+            override val labels: List<Label> = listOf("background", "person").let(::labels)
+        }
+
+        object SemSegm : TFFile {
+            override val file = "semsegm_of8000_latency_16fp.tflite"
+            override val labels: List<Label> = listOf("background", "person").let(::labels)
+        }
+
+        fun labels(metadata: List<String>): List<Label> {
+            val colors = MutableList(metadata.size) {
+                Label(
+                    metadata[0], "", Color.BLACK
+                )
+            }
+
+            val random = Random()
+            val goldenRatioConjugate = 0.618033988749895
+            var hue = random.nextDouble()
+
+            // Skip the first label as it's already assigned black
+            for (idx in 1 until metadata.size) {
+                hue += goldenRatioConjugate
+                hue %= 1.0
+                // Adjust saturation & lightness as needed
+                val color = Color.HSVToColor(floatArrayOf(hue.toFloat() * 360, 0.7f, 0.8f))
+                colors[idx] = Label(metadata[idx], "", color)
+            }
+
+            return colors
+        }
+    }
 }

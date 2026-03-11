@@ -93,10 +93,10 @@ fun CameraScreen(
             onImageAnalyzed = { imageProxy ->
                 onImageAnalyzed(imageProxy)
             })
-        if (uiState.overlayInfo != null) {
+        if (uiState.bitmap != null) {
             SegmentationOverlay(
                 modifier = Modifier.fillMaxSize(),
-                overlayInfo = uiState.overlayInfo
+                bitmap = uiState.bitmap
             )
         }
     }

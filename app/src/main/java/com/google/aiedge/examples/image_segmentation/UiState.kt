@@ -16,33 +16,12 @@
 
 package com.google.aiedge.examples.image_segmentation
 
+import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.compose.runtime.Immutable
 
 @Immutable
 class UiState(
-    val overlayInfo: OverlayInfo? = null,
+    val bitmap: Bitmap?,
     val errorMessage: String? = null,
 )
-
-@Immutable
-class OverlayInfo(
-    val pixels: IntArray,
-    val width: Int,
-    val height: Int,
-)
-
-@Immutable
-data class ColorLabel(
-    val id: Int,
-    val label: String,
-    val rgbColor: Int,
-) {
-
-    fun getColor(): Int {
-        // Use completely transparent for the background color.
-        return if (id == 0) Color.TRANSPARENT else Color.argb(
-            128, Color.red(rgbColor), Color.green(rgbColor), Color.blue(rgbColor)
-        )
-    }
-}

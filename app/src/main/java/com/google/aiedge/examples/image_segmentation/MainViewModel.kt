@@ -17,6 +17,7 @@
 package com.google.aiedge.examples.image_segmentation
 
 import android.content.Context
+import android.graphics.Bitmap
 import androidx.camera.core.ImageProxy
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -51,38 +53,10 @@ class MainViewModel(
 
     private var segmentJob: Job? = null
 
-    private val segmentationUiShareFlow = MutableStateFlow<Pair<OverlayInfo?, Long>>(
-        Pair(null, 0L)
-    ).also { flow ->
+    private val segmentationUiShareFlow = MutableStateFlow<Bitmap?>(null).also { flow ->
         viewModelScope.launch {
             imageSegmentationHelper.segmentation
-                .filter { it.segmentation.masks.isNotEmpty() }.map {
-                    val segmentation = it.segmentation
-                    val maskTensor = segmentation.masks[0]
-                    val maskArray = maskTensor.buffer.array()
-                    val pixels = IntArray(maskArray.size)
-
-                    val colorLabels = segmentation.labels.mapIndexed { index, coloredLabel ->
-                        ColorLabel(
-                            index, coloredLabel.label, coloredLabel.argb
-                        )
-                    }
-                    // Set color for pixels
-                    for (i in maskArray.indices) {
-                        val colorLabel = colorLabels[maskArray[i].toInt()]
-                        val color = colorLabel.getColor()
-                        pixels[i] = color
-                    }
-                    // Get image info
-                    val width = maskTensor.width
-                    val height = maskTensor.height
-                    val overlayInfo = OverlayInfo(
-                        pixels = pixels, width = width, height = height
-                    )
-
-                    val inferenceTime = it.inferenceTime
-                    Pair(overlayInfo, inferenceTime)
-                }.collect {
+                .mapNotNull { it.bitmap }.collect {
                     flow.emit(it)
                 }
         }
@@ -97,12 +71,12 @@ class MainViewModel(
     val uiState: StateFlow<UiState> = combine(
         segmentationUiShareFlow,
         errorMessage,
-    ) { segmentationUiPair, error ->
+    ) { bitmap, error ->
         UiState(
-            overlayInfo = segmentationUiPair.first,
+            bitmap = bitmap,
             errorMessage = error?.message
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState(null, null))
 
 
     /** Start segment an image.
@@ -123,7 +97,7 @@ class MainViewModel(
     fun stopSegment() {
         viewModelScope.launch {
             segmentJob?.cancel()
-            segmentationUiShareFlow.emit(Pair(null, 0L))
+            segmentationUiShareFlow.emit(null)
         }
     }
 

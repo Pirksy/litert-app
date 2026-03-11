@@ -18,9 +18,15 @@ package com.google.aiedge.examples.image_segmentation
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
-import android.os.SystemClock
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.util.Log
+import androidx.core.graphics.scale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,22 +36,19 @@ import kotlinx.coroutines.withContext
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.common.ops.NormalizeOp
-import org.tensorflow.lite.support.image.ColorSpaceType
 import org.tensorflow.lite.support.image.ImageProcessor
-import org.tensorflow.lite.support.image.ImageProperties
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.image.ops.Rot90Op
-import java.nio.ByteBuffer
 import java.nio.FloatBuffer
-import java.util.Random
+import androidx.core.graphics.createBitmap
+import org.tensorflow.lite.DataType
 
 class ImageSegmentationHelper(private val context: Context) {
     companion object {
         private const val TAG = "ImageSegmentation"
     }
 
-    /** As the result of sound classification, this value emits map of probabilities */
     private val _segmentation = MutableSharedFlow<SegmentationResult>(
         extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
@@ -54,11 +57,10 @@ class ImageSegmentationHelper(private val context: Context) {
     private val _error = MutableSharedFlow<Throwable?>()
     val error: SharedFlow<Throwable?> get() = _error
 
-    private val type: TFFile = TFFile.Deeplab
+    private val type: TFFile = TFFile.SemSegm(context)
 
     private var interpreter: Interpreter? = null
 
-    /** Init a Interpreter from file.*/
     suspend fun initClassifier(delegate: Delegate = Delegate.CPU) {
         interpreter = try {
             val litertBuffer = FileUtil.loadMappedFile(context, type.file)
@@ -79,24 +81,10 @@ class ImageSegmentationHelper(private val context: Context) {
     suspend fun segment(bitmap: Bitmap, rotationDegrees: Int) {
         try {
             withContext(Dispatchers.IO) {
-                if (interpreter == null) return@withContext
-                val startTime = SystemClock.uptimeMillis()
-
-                val (_, h, w, _) = interpreter?.getOutputTensor(0)?.shape() ?: return@withContext
-                val imageProcessor =
-                    ImageProcessor
-                        .Builder()
-                        .add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR))
-                        .add(Rot90Op(-rotationDegrees / 90))
-                        .add(NormalizeOp(127.5f, 127.5f))
-                        .build()
-
-                // Preprocess the image and convert it into a TensorImage for segmentation.
-                val tensorImage = imageProcessor.process(TensorImage.fromBitmap(bitmap))
-                val segmentResult = segment(tensorImage)
-                val inferenceTime = SystemClock.uptimeMillis() - startTime
+                val interpreter = interpreter ?: return@withContext
                 if (isActive) {
-                    _segmentation.emit(SegmentationResult(segmentResult, inferenceTime))
+                    val result = segment(interpreter, bitmap, type.bitmap, rotationDegrees)
+                    _segmentation.emit(SegmentationResult(result))
                 }
             }
         } catch (e: Exception) {
@@ -105,141 +93,81 @@ class ImageSegmentationHelper(private val context: Context) {
         }
     }
 
-    private fun segment(tensorImage: TensorImage): Segmentation {
-        val (_, h, w, c) = interpreter!!.getOutputTensor(0).shape()
-        val outputBuffer = FloatBuffer.allocate(h * w * c)
+    private fun segment(
+        interpreter: Interpreter,
+        input: Bitmap,
+        background: Bitmap,
+        rotationDegrees: Int
+    ): Bitmap {
+        val (i, h, w, c) = interpreter.getOutputTensor(0).shape()
+        val imageProcessor = ImageProcessor.Builder()
+            .add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR))
+            .add(Rot90Op(-rotationDegrees / 90))
+            .add(NormalizeOp(127.5f, 127.5f))
+            .build()
 
-        outputBuffer.rewind()
-        interpreter?.run(tensorImage.tensorBuffer.buffer, outputBuffer)
+        var tensorImage = TensorImage(DataType.FLOAT32)
+        tensorImage.load(input)
+        tensorImage = imageProcessor.process(tensorImage)
 
-        outputBuffer.rewind()
-        val inferenceData =
-            InferenceData(width = w, height = h, channels = c, buffer = outputBuffer)
-        val mask = processImage(inferenceData)
+        val outputBuffer = FloatBuffer.allocate(i * h * w * c)
+        interpreter.run(tensorImage.buffer, outputBuffer)
 
-        val imageProperties =
-            ImageProperties
-                .builder()
-                .setWidth(inferenceData.width)
-                .setHeight(inferenceData.height)
-                .setColorSpaceType(ColorSpaceType.GRAYSCALE)
-                .build()
-        val maskImage = TensorImage()
-        maskImage.load(mask, imageProperties)
-        return Segmentation(
-            listOf(maskImage), type.labels
-        )
+        return generateGenericMaskFromBuffer(background, outputBuffer, w, h, c)
     }
 
-    private fun processImage(inferenceData: InferenceData): ByteBuffer {
-        val mask = ByteBuffer.allocateDirect(inferenceData.width * inferenceData.height)
-        for (i in 0 until inferenceData.height) {
-            for (j in 0 until inferenceData.width) {
-                val offset = inferenceData.channels * (i * inferenceData.width + j)
-
-                var maxIndex = 0
-                var maxValue = inferenceData.buffer.get(offset)
-
-                for (index in 1 until inferenceData.channels) {
-                    if (inferenceData.buffer.get(offset + index) > maxValue) {
-                        maxValue = inferenceData.buffer.get(offset + index)
-                        maxIndex = index
-                    }
-                }
-
-                mask.put(i * inferenceData.width + j, maxIndex.toByte())
-            }
+    private fun generateGenericMaskFromBuffer(
+        resBackground: Bitmap,
+        buffer: FloatBuffer,
+        w: Int,
+        h: Int,
+        c: Int,
+        targetChannel: Int = 1
+    ): Bitmap {
+        buffer.rewind()
+        val actualChannel = if (c == 1) 0 else targetChannel
+        val smallMask = createBitmap(w, h)
+        val maskPixels = IntArray(w * h)
+        for (i in 0 until (w * h)) {
+            val confidence = buffer.get(i * c + actualChannel)
+            val alpha = (confidence * 255).toInt().coerceIn(0, 255)
+            maskPixels[i] = Color.argb(alpha, 0, 0, 0)
         }
-
-        return mask
+        smallMask.setPixels(maskPixels, 0, w, 0, 0, w, h)
+        val fullResMask = smallMask.scale(resBackground.width, resBackground.height)
+        val result = createBitmap(resBackground.width, resBackground.height)
+        val canvas = Canvas(result)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        canvas.drawBitmap(fullResMask, 0f, 0f, paint)
+        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
+        canvas.drawBitmap(resBackground, 0f, 0f, paint)
+        return result
     }
 
-    data class Segmentation(
-        val masks: List<TensorImage>,
-        val labels: List<Label>,
-    )
-
-    data class Label(val label: String, val displayName: String, val argb: Int)
+    fun Bitmap.rotate(degrees: Float): Bitmap {
+        val matrix = Matrix().apply { postRotate(degrees) }
+        return Bitmap.createBitmap(this, 0, 0, width, height, matrix, true)
+    }
 
     enum class Delegate {
         CPU, NNAPI
     }
 
     data class SegmentationResult(
-        val segmentation: Segmentation,
-        val inferenceTime: Long
-    )
-
-    data class InferenceData(
-        val width: Int,
-        val height: Int,
-        val channels: Int,
-        val buffer: FloatBuffer,
+        val bitmap: Bitmap,
     )
 
     sealed interface TFFile {
         val file: String
-        val labels: List<Label>
+        val labels: List<String>
+        val bitmap: Bitmap
 
-        object Deeplab : TFFile {
-            override val file = "deeplab_v3.tflite"
-            override val labels: List<Label> = listOf(
-                "background",
-                "aeroplane",
-                "bicycle",
-                "bird",
-                "boat",
-                "bottle",
-                "bus",
-                "car",
-                "cat",
-                "chair",
-                "cow",
-                "dining table",
-                "dog",
-                "horse",
-                "motorbike",
-                "person",
-                "potted plant",
-                "sheep",
-                "sofa",
-                "train",
-                "tv",
-                "------"
-            ).let(::labels)
-        }
-
-        object Selfie : TFFile {
-            override val file = "selfie_segmenter_square.tflite"
-            override val labels: List<Label> = listOf("background", "person").let(::labels)
-        }
-
-        object SemSegm : TFFile {
+        data class SemSegm(private val context: Context) : TFFile {
             override val file = "semsegm_of8000_latency_16fp.tflite"
-            override val labels: List<Label> = listOf("background", "person").let(::labels)
-        }
-
-        fun labels(metadata: List<String>): List<Label> {
-            val colors = MutableList(metadata.size) {
-                Label(
-                    metadata[0], "", Color.BLACK
-                )
+            override val labels = listOf("background", "person")
+            override val bitmap: Bitmap = context.assets.open("background.png").use {
+                BitmapFactory.decodeStream(it)
             }
-
-            val random = Random()
-            val goldenRatioConjugate = 0.618033988749895
-            var hue = random.nextDouble()
-
-            // Skip the first label as it's already assigned black
-            for (idx in 1 until metadata.size) {
-                hue += goldenRatioConjugate
-                hue %= 1.0
-                // Adjust saturation & lightness as needed
-                val color = Color.HSVToColor(floatArrayOf(hue.toFloat() * 360, 0.7f, 0.8f))
-                colors[idx] = Label(metadata[idx], "", color)
-            }
-
-            return colors
         }
     }
 }
